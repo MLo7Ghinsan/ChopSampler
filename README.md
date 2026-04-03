@@ -32,7 +32,7 @@ Available parameters:
 - velocity
 - normalization
 
-- distortion growl (gw). range 0-100. default 0
-- distortion speed (gws). range 0-100. default 75
+- distortion growl (dg). range 0-100. default 0
+- distortion speed (dgs). range 0-100. default 75
 - frygrowl attempt (fg). range 0-100. default 0
 - force voicing (fv). range 0-1. default 0
