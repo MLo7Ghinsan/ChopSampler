@@ -1,0 +1,66 @@
+expressions:
+  hvoi:
+    name: Voiced Harmonics (ChopSampler)
+    abbr: PRG
+    type: Numerical
+    min: 0
+    max: 100
+    default_value: 100
+    is_flag: true
+    flag: V
+  cons:
+    name: Unvoiced Consonant Gain (ChopSampler)
+    abbr: APG
+    type: Numerical
+    min: -100
+    max: 100
+    default_value: 0
+    is_flag: true
+    flag: U
+  dgwl:
+    name: Distortion/Modulation Growl (ChopSampler)
+    abbr: DGW
+    type: Numerical
+    min: 0
+    max: 100
+    default_value: 0
+    is_flag: true
+    flag: dg
+  dgwr:
+    name: Distortion/Modulation rate for DGW (ChopSampler)
+    abbr: DGWS
+    type: Numerical
+    min: 0
+    max: 100
+    default_value: 75
+    is_flag: true
+    flag: dgs
+  fgwl:
+    name: Fry Growl (ChopSampler)
+    abbr: FGW
+    type: Numerical
+    min: 0
+    max: 100
+    default_value: 0
+    is_flag: true
+    flag: fg
+  ggwl:
+    name: Guttural Growl (ChopSampler)
+    abbr: GGW
+    type: Numerical
+    min: 0
+    max: 100
+    default_value: 0
+    is_flag: true
+    flag: gg
+  fvoi:
+    name: Force Voicing (ChopSampler)
+    abbr: FVOI
+    type: Options
+    min: 0
+    max: 1
+    default_value: 0
+    is_flag: true
+    options:
+    - fv0
+    - fv1
