@@ -25,14 +25,19 @@ Because of how it works. This resampler chops your audio into small little grain
 
 ---
 
-## ✨ Flags (I'll make this nicer later)
+## ✨ Flag List | count: 10
 
-Available parameters:
-- gender
-- velocity
-- normalization
+NOTE: Some of these are an attempt effects, may not return expected sounding result
 
-- distortion growl (dg). range 0-100. default 0
-- distortion speed (dgs). range 0-100. default 75
-- frygrowl attempt (fg). range 0-100. default 0
-- force voicing (fv). range 0-1. default 0
+| Flag | Range    | Default | Description |
+|------|----------|---------|-------------|
+| `g`  | `-100`-`100`  | `0` | Formant shift. Gender effect |
+| `V`  | `0`-`100`     | `100` | Harmonic (voiced) level |
+| `B`  | `-100`-`100`  | `0`   | Breathiness level |
+| `U`  | `-100`-`100`  | `0`   | Unvoiced (fricative) level |
+| `P`  | `0`-`100`      | `0`  | Normalization |
+| `dg` | `0`-`100`     | `0`   | Distortion Growl effect|
+| `dgs` | `0`-`100`     | `75`   | Rate of `dg` modulation|
+| `fg` | `0`-`100`     | `0`   | Fry Growl effect|
+| `gg` | `0`-`100`     | `0`   | Guttural Growl effect|
+| `fv` | `0`-`1`     | `0`   | Force every frames to be voiced frame (affected by pitch)|
