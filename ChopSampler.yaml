@@ -64,3 +64,12 @@ expressions:
     options:
     - fv0
     - fv1
+  tens:
+    name: Tension (ChopSampler)
+    abbr: TENS
+    type: Numerical
+    min: -100
+    max: 100
+    default_value: 0
+    is_flag: true
+    flag: tn
