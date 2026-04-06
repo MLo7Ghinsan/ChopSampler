@@ -25,7 +25,7 @@ Because of how it works. This resampler chops your audio into small little grain
 
 ---
 
-## ✨ Flag List | count: 10
+## ✨ Flag List | count: 12
 
 NOTE: Some of these are an attempt effects, may not return expected sounding result
 
