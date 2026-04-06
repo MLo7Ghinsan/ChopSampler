@@ -32,6 +32,7 @@ NOTE: Some of these are an attempt effects, may not return expected sounding res
 | Flag | Range    | Default | Description |
 |------|----------|---------|-------------|
 | `g`  | `-100`-`100`  | `0` | Formant shift. Gender effect |
+| `t`  | `-100`-`100`  | `0` | Off cent flag |
 | `V`  | `0`-`100`     | `100` | Harmonic (voiced) level |
 | `B`  | `-100`-`100`  | `0`   | Breathiness level |
 | `U`  | `-100`-`100`  | `0`   | Unvoiced (fricative) level |
@@ -41,3 +42,4 @@ NOTE: Some of these are an attempt effects, may not return expected sounding res
 | `fg` | `0`-`100`     | `0`   | Fry Growl effect|
 | `gg` | `0`-`100`     | `0`   | Guttural Growl effect|
 | `fv` | `0`-`1`     | `0`   | Force every frames to be voiced frame (affected by pitch)|
+| `tn` | `-100`-`100`     | `0`   | Tension |
