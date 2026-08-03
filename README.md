@@ -2,14 +2,14 @@
   <img src="cupcakke.jpg" width="220">
 </p>
 
-<h1 align="center">ChopSampler</h1>
+<h1 align="center">ChudSampler</h1>
 
 <p align="center">
-  <b>Resampler for Utau / OpenUtau that uses custom TD-PSOLA implementation</b>
+  <b>ChopSampler branch that doesn't use TD-PSOLA to synthesize harmonics</b>
 </p>
 
 <p align="center">
-  TDPSOLA-based pitching/stretching | Period morphing for lesser artifacts
+  From Chop to Chud
 </p>
 
 <p align="center">
@@ -19,15 +19,15 @@
 
 ---
 
-## Why the name ChopSampler?
+## Why the name ChudSampler?
 
-Because of how it works. This resampler chops your audio into small little grains and move them to perform pitching... And also this resampler is a chopped chud
+Because this resampler is a chopped chud just like MLo7
 
 ---
 
 ## ✨ Flag List | count: 12
 
-NOTE: Some of these are an attempt effects, may not return expected sounding result
+NOTE: These flags are the same so um yea
 
 | Flag | Range    | Default | Description |
 |------|----------|---------|-------------|
