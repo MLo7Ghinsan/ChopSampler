@@ -70,6 +70,78 @@ fn np_hanning_sqrt(m: usize) -> Vec<f32> {
     (0..m).map(|n| (0.5 - 0.5 * (2.0 * PI * n as f32 / (m as f32 - 1.0)).cos()).max(0.0).sqrt()).collect()
 }
 
+fn build_time_map(
+    seg_len: usize,
+    cons_n: usize,
+    cons_out: usize,
+    out_n: usize,
+    sr: u32,
+) -> Vec<f32> {
+    let mut time_map = vec![0.0_f32; out_n];
+    if out_n == 0 || seg_len == 0 { return time_map; }
+
+    let last_source = seg_len.saturating_sub(1) as f32;
+    let consonant_source = cons_n.min(seg_len.saturating_sub(1)) as f32;
+    let head_out = cons_out.min(out_n);
+
+    // vel stuff
+    if head_out > 0 {
+        let denominator = head_out as f32;
+        for i in 0..head_out {
+            time_map[i] = consonant_source * i as f32 / denominator;
+        }
+    }
+
+    let tail_out = out_n.saturating_sub(head_out);
+    let sustain_span = (last_source - consonant_source).max(0.0);
+    if tail_out > 0 {
+        for j in 0..tail_out {
+            time_map[head_out + j] = if sustain_span > 0.0 {
+                let cycle = sustain_span * 2.0;
+                let phase = j as f32 % cycle;
+                consonant_source + if phase <= sustain_span { phase } else { cycle - phase }
+            } else {
+                consonant_source
+            };
+        }
+    }
+
+    if head_out > 1 && tail_out > 1 && sustain_span > 0.0 {
+        let radius = ((sr as f32 * 0.02).round() as usize)
+            .min(head_out / 2)
+            .min(tail_out - 1)
+            .min((sustain_span as usize) / 2);
+
+        if radius > 1 {
+            let left = head_out - radius;
+            let right = head_out + radius;
+            let y0 = time_map[left];
+            let y1 = time_map[right];
+            let interval = (right - left) as f32;
+            let secant = ((y1 - y0) / interval).max(0.0);
+            let head_rate = (consonant_source / head_out as f32).min(3.0 * secant);
+            let tail_rate = 1.0_f32.min(3.0 * secant);
+
+            for i in left..=right {
+                let u = (i - left) as f32 / interval;
+                let u2 = u * u;
+                let u3 = u2 * u;
+                let h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+                let h10 = u3 - 2.0 * u2 + u;
+                let h01 = -2.0 * u3 + 3.0 * u2;
+                let h11 = u3 - u2;
+                time_map[i] = (h00 * y0
+                    + h10 * interval * head_rate
+                    + h01 * y1
+                    + h11 * interval * tail_rate)
+                    .clamp(0.0, last_source);
+            }
+        }
+    }
+
+    time_map
+}
+
 #[derive(Serialize, Deserialize)]
 struct PitchData {
     epochs: Vec<f32>,
@@ -147,8 +219,7 @@ fn extract_pitch_features(audio: &[f32], sr: u32) -> PitchData {
 
                 if max_score > 0.0 {
                     peak_idx = (expected_epoch as isize + best_tau) as usize;
-
-                    // trying to correct errorz
+                    
                     let bi = (best_tau + search_radius) as usize;
                     if bi > 0 && bi + 1 < n_tau {
                         let (sm, s0, sp) = (scores[bi - 1], scores[bi], scores[bi + 1]);
@@ -263,11 +334,12 @@ fn istft(spectra: &[Vec<Complex<f32>>], n_fft: usize, hop_length: usize, expecte
     final_y
 }
 
-fn separate_components(audio: &[f32], sr: u32, _pitch_data: &PitchData) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+fn separate_components(audio: &[f32], sr: u32, force_voicing: bool) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let n_fft = 1024;
     let hop_length = 256;
     let window = np_hanning_sqrt(n_fft);
 
+    // from epoch tracking peak-centred
     let audio_f64: Vec<f64> = audio.iter().map(|&x| x as f64).collect();
     let praat_sound = Sound::from_samples_owned(audio_f64, sr as f64);
     let pitch = praat_sound.to_pitch(0.0, 50.0, 1200.0);
@@ -282,8 +354,15 @@ fn separate_components(audio: &[f32], sr: u32, _pitch_data: &PitchData) -> (Vec<
     for f in 0..num_frames {
         let t_sec = f as f64 * hop_length as f64 / sr as f64;
         let frame_idx = pitch.get_frame_from_time(t_sec);
-        let f0 = pitch.get_value_at_frame(frame_idx).unwrap_or(0.0) as f32;
-        raw_f0[f] = if f0 > 0.0 { f0 } else { 0.0 };
+        let detected_f0 = pitch.get_value_at_frame(frame_idx).unwrap_or(0.0) as f32;
+        let f0 = if detected_f0 > 0.0 {
+            detected_f0
+        } else if force_voicing {
+            100.0
+        } else {
+            0.0
+        };
+        raw_f0[f] = f0;
         if f0 > 0.0 {
             voiced_indices.push(f as f32);
             voiced_f0_vals.push(f0);
@@ -297,7 +376,8 @@ fn separate_components(audio: &[f32], sr: u32, _pitch_data: &PitchData) -> (Vec<
         vec![100.0; num_frames]
     };
 
-    let voiced_set: std::collections::HashSet<usize> = (0..num_frames).filter(|&f| raw_f0[f] > 0.0).collect();
+    let voiced_set: std::collections::HashSet<usize> =
+        (0..num_frames).filter(|&f| raw_f0[f] > 0.0).collect();
 
     let mut harm_spectra = vec![vec![Complex::new(0.0, 0.0); n_fft / 2 + 1]; num_frames];
     let mut breath_spectra = vec![vec![Complex::new(0.0, 0.0); n_fft / 2 + 1]; num_frames];
@@ -309,10 +389,12 @@ fn separate_components(audio: &[f32], sr: u32, _pitch_data: &PitchData) -> (Vec<
         let voiced = voiced_set.contains(&f);
         let current_f0 = smooth_f0[f].clamp(50.0, 1200.0);
 
-        let mut mag_db = vec![0.0; n_fft / 2 + 1];
-        for b in 0..=n_fft / 2 { mag_db[b] = 20.0 * (zxx[f][b].norm() + 1e-12).log10(); }
+        let mut mag_db = vec![0.0_f32; n_fft / 2 + 1];
+        for b in 0..=n_fft / 2 {
+            mag_db[b] = 20.0 * (zxx[f][b].norm() + 1e-12).log10();
+        }
 
-        let mut mask = vec![0.0; n_fft / 2 + 1];
+        let mut mask = vec![0.0_f32; n_fft / 2 + 1];
 
         if voiced {
             let max_harmonics = (max_voiced_freq / current_f0) as usize;
@@ -326,14 +408,19 @@ fn separate_components(audio: &[f32], sr: u32, _pitch_data: &PitchData) -> (Vec<
                 let end_bin = (n_fft / 2).min(center_bin + search_radius + 1);
 
                 if start_bin < end_bin {
-                    let mut max_val = -999.0;
+                    let mut max_val = -999.0_f32;
                     let mut actual_bin = start_bin;
                     for b in start_bin..end_bin {
-                        if mag_db[b] > max_val { max_val = mag_db[b]; actual_bin = b; }
+                        if mag_db[b] > max_val {
+                            max_val = mag_db[b];
+                            actual_bin = b;
+                        }
                     }
-                    let m_start = actual_bin.saturating_sub(1);
-                    let m_end = (actual_bin + 2).min(n_fft / 2 + 1);
-                    for b in m_start..m_end { mask[b] = 1.0; }
+                    let mask_start = actual_bin.saturating_sub(1);
+                    let mask_end = (actual_bin + 2).min(n_fft / 2 + 1);
+                    for value in &mut mask[mask_start..mask_end] {
+                        *value = 1.0;
+                    }
                 }
             }
         }
@@ -355,23 +442,47 @@ fn separate_components(audio: &[f32], sr: u32, _pitch_data: &PitchData) -> (Vec<
     (harm_audio, breath_audio, unvoiced_audio)
 }
 
-fn get_aligned_grain(audio: &[f32], center: f32, size: usize) -> Vec<f32> {
+fn get_grain_directed(audio: &[f32], center: f32, size: usize, reverse: bool) -> Vec<f32> {
     let base = center.round();
-    let mut grain = vec![0.0; size];
-    let start = base as isize - (size as isize / 2);
-    for i in 0..size as isize {
-        let idx = start + i;
-        if idx >= 0 && (idx as usize) < audio.len() {
-            grain[i as usize] = audio[idx as usize];
-        }
-    }
-
-    // use sub-sample ref
     let d = center - base;
-    if d.abs() < 1e-6 { grain } else { frac_delay(&grain, -d) }
+    let half = size as isize / 2;
+    let mut grain = vec![0.0; size];
+
+    if reverse {
+        let start = base as isize + half;
+        for i in 0..size as isize {
+            let idx = start - i;
+            if idx >= 0 && (idx as usize) < audio.len() {
+                grain[i as usize] = audio[idx as usize];
+            }
+        }
+        // flips
+        if d.abs() < 1e-6 { grain } else { frac_delay(&grain, d) }
+    } else {
+        let start = base as isize - half;
+        for i in 0..size as isize {
+            let idx = start + i;
+            if idx >= 0 && (idx as usize) < audio.len() {
+                grain[i as usize] = audio[idx as usize];
+            }
+        }
+        if d.abs() < 1e-6 { grain } else { frac_delay(&grain, -d) }
+    }
 }
 
-// phase thing
+fn map_runs_backward(time_map_abs: &[f32], output_pos: usize, span: usize) -> bool {
+    if time_map_abs.len() < 2 { return false; }
+    let last = time_map_abs.len() - 1;
+    let half = (span / 2).max(1);
+    let lo = output_pos.saturating_sub(half).min(last);
+    let hi = output_pos.saturating_add(half).min(last);
+    hi > lo && time_map_abs[hi] < time_map_abs[lo]
+}
+
+fn get_aligned_grain(audio: &[f32], center: f32, size: usize) -> Vec<f32> {
+    get_grain_directed(audio, center, size, false)
+}
+
 fn frac_delay(x: &[f32], d: f32) -> Vec<f32> {
     if d.abs() < 1e-6 { return x.to_vec(); }
     let n = x.len();
@@ -392,85 +503,73 @@ fn frac_delay(x: &[f32], d: f32) -> Vec<f32> {
     out
 }
 
-// OLA along a time map
-fn ola_stretch_from_map(src: &[f32], time_map_abs: &[f32], out_len: usize, hop: usize) -> Vec<f32> {
-    let mut out = vec![0.0_f32; out_len];
-    if out_len == 0 || src.is_empty() || hop == 0 || time_map_abs.is_empty() { return out; }
+fn overlap_add_grain(
+    output: &mut [f32],
+    weight_sum: &mut [f32],
+    grain: &[f32],
+    window: &[f32],
+    target_pos: f32,
+    gain: f32,
+) {
+    if grain.is_empty() || grain.len() != window.len() { return; }
 
-    let win_size = hop * 2;
-    let window = np_hanning(win_size);
-    let half = win_size as isize / 2;
-    let mut win_sum = vec![0.0_f32; out_len];
+    let windowed: Vec<f32> = grain.iter().zip(window).map(|(&x, &w)| x * w).collect();
+    let target_base = target_pos.floor() as isize;
+    let target_fraction = target_pos - target_base as f32;
+    let placed = frac_delay(&windowed, target_fraction);
+    let placed_window = frac_delay(window, target_fraction);
+    let start = target_base - placed.len() as isize / 2;
 
-    let last = time_map_abs.len() - 1;
-    let map_rate = if last > 0 { time_map_abs[last] - time_map_abs[last - 1] } else { 1.0 };
-
-    // one ex frame past the end for coverage
-    let mut s = 0_isize;
-    while s < (out_len + hop) as isize {
-        //clamping might misalign the grain me think
-        let center = if (s as usize) <= last {
-            time_map_abs[s as usize]
-        } else {
-            time_map_abs[last] + map_rate * (s - last as isize) as f32
-        };
-        let src_start = center - half as f32;
-
-        for i in 0..win_size {
-            let out_idx = s + i as isize - half;
-            if out_idx < 0 || out_idx as usize >= out_len { continue; }
-
-            let pos = src_start + i as f32;
-            let i0 = pos.floor();
-            let frac = pos - i0;
-            let i0 = i0 as isize;
-            let s0 = if i0 >= 0 && (i0 as usize) < src.len() { src[i0 as usize] } else { 0.0 };
-            let s1 = if i0 + 1 >= 0 && ((i0 + 1) as usize) < src.len() { src[(i0 + 1) as usize] } else { 0.0 };
-
-            out[out_idx as usize] += (s0 + (s1 - s0) * frac) * window[i];
-            win_sum[out_idx as usize] += window[i];
+    for i in 0..placed.len() {
+        let out_idx = start + i as isize;
+        if out_idx >= 0 && (out_idx as usize) < output.len() {
+            let out_idx = out_idx as usize;
+            output[out_idx] += placed[i] * gain;
+            weight_sum[out_idx] += placed_window[i].max(0.0);
         }
-        s += hop as isize;
+    }
+}
+
+fn wola_aperiodic_from_map(
+    src: &[f32],
+    time_map_abs: &[f32],
+    out_len: usize,
+    hop: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0_f32; out_len];
+    if src.is_empty() || time_map_abs.is_empty() || out_len == 0 || hop == 0 {
+        return output;
+    }
+
+    let mut grain_size = hop.saturating_mul(4).max(8);
+    grain_size += grain_size % 2;
+    let window = np_hanning(grain_size);
+    let mut weight_sum = vec![0.0_f32; out_len];
+
+    let mut output_center = 0_usize;
+    while output_center < out_len {
+        let map_index = output_center.min(time_map_abs.len() - 1);
+        let source_center = time_map_abs[map_index];
+        let reverse = map_runs_backward(time_map_abs, output_center, hop);
+        let grain = get_grain_directed(src, source_center, grain_size, reverse);
+        overlap_add_grain(
+            &mut output,
+            &mut weight_sum,
+            &grain,
+            &window,
+            output_center as f32,
+            1.0,
+        );
+        output_center = output_center.saturating_add(hop);
     }
 
     for i in 0..out_len {
-        if win_sum[i] > 1e-3 { out[i] /= win_sum[i]; }
-    }
-
-    let rms = |x: &[f32], from: isize, n: usize| -> f32 {
-        let mut acc = 0.0_f32;
-        for i in 0..n as isize {
-            let idx = from + i;
-            if idx >= 0 && (idx as usize) < x.len() { acc += x[idx as usize] * x[idx as usize]; }
+        if weight_sum[i] > 1e-4 {
+            output[i] /= weight_sum[i];
         }
-        (acc / n as f32).sqrt()
-    };
-
-    let n_frames = out_len / hop + 2;
-    let mut frame_gain = Vec::with_capacity(n_frames);
-    for k in 0..n_frames {
-        let s = (k * hop) as isize;
-        let center = if (s as usize) <= last {
-            time_map_abs[s as usize]
-        } else {
-            time_map_abs[last] + map_rate * (s - last as isize) as f32
-        };
-        let out_rms = rms(&out, s - half, win_size);
-        let src_rms = rms(src, (center - half as f32).round() as isize, win_size);
-        let g = if out_rms > 1e-6 { (src_rms / out_rms).clamp(0.5, 2.0) } else { 1.0 };
-        frame_gain.push(g);
     }
 
-    for i in 0..out_len {
-        let f = i as f32 / hop as f32;
-        let k = f as usize;
-        let w = f - k as f32;
-        let g0 = frame_gain[k.min(n_frames - 1)];
-        let g1 = frame_gain[(k + 1).min(n_frames - 1)];
-        out[i] *= g0 + (g1 - g0) * w;
-    }
-
-    out
+    output
 }
 
 fn dynamic_onepole_filter(x: &mut [f32], f0_hz: &[f32], sr: u32, cutoff_factor: f32, order: usize, highpass: bool) {
@@ -505,17 +604,14 @@ fn td_psola_utau(
     harm_audio: &[f32],
     breath_audio: &[f32],
     unvoiced_audio: &[f32],
-    orig_audio: &[f32],
     sr: u32,
     target_f0_hz: &[f32],
     time_map: &[f32],
     seg_start: usize,
-    seg_end: usize,
     epochs: &[f32],
-    mut is_voiced: Vec<f32>,
-    mut t0_array: Vec<f32>,
+    is_voiced: &[f32],
+    t0_array: &[f32],
     formant_semitones: f32,
-    force_voicing: bool,
     voice_drive: f32,
     drive_speed: f32,
     fry_intensity: f32,
@@ -524,7 +620,6 @@ fn td_psola_utau(
     b_gain: f32,
     gg_intensity: f32,
     tension: f32,
-    cons_n: usize,
     seed: u64,
 ) -> Vec<f32> {
     let formant_factor = 2.0_f32.powf(formant_semitones / 12.0);
@@ -532,67 +627,46 @@ fn td_psola_utau(
     let mut rng = StdRng::seed_from_u64(seed);
     let normal_dist = Normal::new(0.0, 1.0).unwrap();
 
-    if force_voicing {
-        for i in 0..is_voiced.len() {
-            if is_voiced[i] == 0.0 {
-                is_voiced[i] = 1.0;
-                t0_array[i] = sr as f32 / 100.0;
-            }
-        }
-    }
-
     let mut abs_time_map = Vec::with_capacity(time_map.len());
     for &t in time_map { abs_time_map.push(t + seg_start as f32); }
 
     let out_len = abs_time_map.len();
     let buf_len = out_len + (sr * 2) as usize;
     let mut output_harm = vec![0.0_f32; buf_len];
+    let rendered_breath = wola_aperiodic_from_map(
+        breath_audio,
+        &abs_time_map,
+        out_len,
+        hop_unvoiced,
+    );
     let mut output_breath = vec![0.0_f32; buf_len];
+    output_breath[..out_len].copy_from_slice(&rendered_breath);
     let mut output_unvoiced = vec![0.0_f32; buf_len];
+    let mut unvoiced_weight = vec![0.0_f32; buf_len];
 
-    let tail_start_sample = (seg_start + cons_n) as f32;
-    let tail_end_sample = seg_end as f32;
-    let cons_out_boundary = cons_n as f32; 
+    if epochs.len() < 2 || is_voiced.len() < epochs.len() || t0_array.len() < epochs.len() {
+        return vec![0.0; out_len];
+    }
 
-    let tail_epoch_indices: Vec<usize> = (0..epochs.len())
-        .filter(|&i| epochs[i] >= tail_start_sample && epochs[i] < tail_end_sample)
-        .collect();
-    let n_tail_epochs = tail_epoch_indices.len();
+    let source_len = harm_audio.len().min(breath_audio.len()).min(unvoiced_audio.len());
 
     let mut t_s = 0.0_f32;
     let mut drive_phase = 0.0_f32;
     let mut prev_t_s = hop_unvoiced as f32;
-    let mut tail_epoch_cursor: f32 = 0.0;
 
     while (t_s as usize) < out_len {
-        let t_a = abs_time_map[t_s as usize];
-        if t_a >= (orig_audio.len() - 1) as f32 { break; }
+        if source_len < 2 { break; }
 
-        let in_tail = time_map.get(t_s as usize).map_or(false, |&tm| tm >= cons_out_boundary);
+        let t_a = abs_time_map[t_s as usize].clamp(0.0, (source_len - 1) as f32);
 
-        let (idx1, idx2, weight) = if in_tail && n_tail_epochs >= 2 {
-            let cursor_int = tail_epoch_cursor as usize;
-            let ei1 = tail_epoch_indices[cursor_int % n_tail_epochs];
-            let ei2 = tail_epoch_indices[(cursor_int + 1) % n_tail_epochs];
-            let w = tail_epoch_cursor.fract();
-
-            let jitter = normal_dist.sample(&mut rng) as f32 * 0.15;
-            let n_out_tail_samples = (out_len as f32 - (cons_n as f32 * 2.0_f32.powf(1.0 - 100.0/100.0))).max(1.0);
-            let advance = (n_tail_epochs as f32 / (n_out_tail_samples / prev_t_s.max(1.0))).max(0.01) + jitter * 0.1;
-            tail_epoch_cursor += advance.max(0.01);
-            if tail_epoch_cursor >= n_tail_epochs as f32 {
-                tail_epoch_cursor -= n_tail_epochs as f32;
-            }
-            if tail_epoch_cursor < 0.0 { tail_epoch_cursor = 0.0; }
-
-            (ei1, ei2, w.clamp(0.0, 1.0))
+        let mut idx1 = searchsorted(epochs, t_a).saturating_sub(1);
+        idx1 = idx1.clamp(0, epochs.len() - 2);
+        let idx2 = idx1 + 1;
+        let diff = epochs[idx2] - epochs[idx1];
+        let weight = if diff > 0.0 {
+            ((t_a - epochs[idx1]) / diff).clamp(0.0, 1.0)
         } else {
-            let mut i1 = searchsorted(epochs, t_a).saturating_sub(1);
-            i1 = i1.clamp(0, epochs.len().saturating_sub(2));
-            let i2 = i1 + 1;
-            let diff = epochs[i2] - epochs[i1];
-            let w = if diff > 0.0 { (t_a - epochs[i1]) / diff } else { 0.0 };
-            (i1, i2, w)
+            0.0
         };
 
         let voicing_mix = (1.0 - weight) * is_voiced[idx1] + weight * is_voiced[idx2.min(is_voiced.len().saturating_sub(1))];
@@ -604,28 +678,28 @@ fn td_psola_utau(
             t_s_target = voicing_mix * (sr as f32 / current_target_hz) + (1.0 - voicing_mix) * hop_unvoiced as f32;
         }
 
-        let t_s_step = t_s_target;
+        let t_s_step = t_s_target.max(1.0);
 
         let mut fry_offset = 0.0_f32;
         let mut fry_amp = 1.0_f32;
 
         // --- PATH A: VOICED ---
         if voicing_mix > 0.0 {
-            let mut extract_win_size_v = (2.0 * t0_interp).round() as usize;
+            let mut extract_win_size_v = (2.0 * t0_interp).round().max(4.0) as usize;
             extract_win_size_v += extract_win_size_v % 2;
 
             let g1_h = get_aligned_grain(harm_audio, epochs[idx1], extract_win_size_v);
             let g2_h = get_aligned_grain(harm_audio, epochs[idx2.min(epochs.len().saturating_sub(1))], extract_win_size_v);
-            
+
             let mut morphed_harm = vec![0.0; extract_win_size_v];
             for i in 0..extract_win_size_v { morphed_harm[i] = (1.0 - weight) * g1_h[i] + weight * g2_h[i]; }
 
             let source_rms = (morphed_harm.iter().map(|x| x * x).sum::<f32>() / extract_win_size_v as f32).sqrt() + 1e-12;
-
             let mut shifted_harm = morphed_harm;
             if (formant_factor - 1.0).abs() > 0.001 {
                 let orig_idx = np_linspace(0.0, 1.0, shifted_harm.len());
                 let mut new_len = (shifted_harm.len() as f32 / formant_factor).round() as usize;
+                new_len = new_len.max(4);
                 new_len += new_len % 2;
                 let new_idx = np_linspace(0.0, 1.0, new_len);
                 shifted_harm = np_interp(&new_idx, &orig_idx, &shifted_harm);
@@ -637,7 +711,7 @@ fn td_psola_utau(
             let current_rms = (shifted_harm.iter().map(|x| x * x).sum::<f32>() / shifted_harm.len() as f32).sqrt() + 1e-12;
             let density_comp = (t_s_step.max(1.0) / t0_interp.max(1.0)).sqrt();
             let mut gain = ((source_rms / current_rms) * density_comp).clamp(0.0, 5.0);
-            
+
             if voice_drive > 0.0 {
                 drive_phase += 2.0 * PI * drive_speed * (t_s_step / sr as f32);
                 gain *= 1.0 + (drive_phase.sin() * voice_drive);
@@ -683,112 +757,25 @@ fn td_psola_utau(
             let mut extract_win_size_u = (hop_unvoiced as f32 * 2.0).max(required_final_size).round() as usize;
             extract_win_size_u += extract_win_size_u % 2;
 
-            let mut stretch_comp = 1.0;
-            if extract_win_size_u as f32 > required_final_size {
-                stretch_comp = required_final_size / extract_win_size_u as f32;
-            }
-
-            let start = t_a as isize - (extract_win_size_u as isize / 2);
-            let mut morphed_pulse_u = vec![0.0; extract_win_size_u];
-            for i in 0..extract_win_size_u as isize {
-                let idx = start + i;
-                if idx >= 0 && idx < unvoiced_audio.len() as isize {
-                    morphed_pulse_u[i as usize] = unvoiced_audio[idx as usize];
-                }
-            }
-
-            let hanning = np_hanning(extract_win_size_u);
-            let ts_pos = t_s.round() as isize;
-            let start_s = ts_pos - (extract_win_size_u as isize / 2);
-
-            for i in 0..extract_win_size_u {
-                let out_idx = start_s + i as isize;
-                if out_idx >= 0 && (out_idx as usize) < buf_len {
-                    output_unvoiced[out_idx as usize] += morphed_pulse_u[i] * hanning[i]
-                        * stretch_comp * (1.0 - voicing_mix);
-                }
-            }
+            let reverse_u = map_runs_backward(&abs_time_map, t_s as usize, hop_unvoiced);
+            let unvoiced_grain = get_grain_directed(unvoiced_audio, t_a, extract_win_size_u, reverse_u);
+            let unvoiced_window = np_hanning(extract_win_size_u);
+            overlap_add_grain(
+                &mut output_unvoiced,
+                &mut unvoiced_weight,
+                &unvoiced_grain,
+                &unvoiced_window,
+                t_s,
+                1.0 - voicing_mix,
+            );
         }
 
         t_s += t_s_step;
         prev_t_s = t_s_step;
     }
-    
-    let tail_len_f = (tail_end_sample - tail_start_sample).max(1.0);
-    let xfade_samples = (sr as f32 * 0.1).round() as f32;
 
-    let cons_out_len = time_map.iter().take_while(|&&tm| tm < cons_out_boundary).count();
-    let breath_cons = ola_stretch_from_map(breath_audio, &abs_time_map, cons_out_len, hop_unvoiced);
-
-    let mut b_ptr = seg_start as f32;
-    let mut b_ptr_next = 0.0_f32;
-    let mut is_xfading = false;
-    let mut xfade_progress = 0.0_f32;
-
-    for t_out in 0..out_len {
-        let t_a = abs_time_map[t_out];
-        let in_tail = time_map.get(t_out).map_or(false, |&tm| tm >= cons_out_boundary);
-        
-        let mut idx1 = searchsorted(epochs, t_a).saturating_sub(1);
-        idx1 = idx1.clamp(0, epochs.len().saturating_sub(2));
-        let idx2 = idx1 + 1;
-        let diff = epochs[idx2] - epochs[idx1];
-        let weight = if diff > 0.0 { (t_a - epochs[idx1]) / diff } else { 0.0 };
-        let voicing_mix = (1.0 - weight) * is_voiced[idx1] + weight * is_voiced[idx2.min(is_voiced.len().saturating_sub(1))];
-
-        let breath_sample;
-
-        if in_tail {
-            if tail_len_f > xfade_samples * 2.0 {
-                // crossfade before hitting the end of the tail
-                if !is_xfading && b_ptr > tail_end_sample - xfade_samples {
-                    is_xfading = true;
-                    xfade_progress = 0.0;
-                    
-                    // pick a random spot earlier in the tail
-                    let r = normal_dist.sample(&mut rng).abs() as f32;
-                    let rand_offset = r.fract() * (tail_len_f - xfade_samples * 2.0).max(1.0);
-                    b_ptr_next = tail_start_sample + rand_offset;
-                }
-
-                if is_xfading {
-                    let p = xfade_progress / xfade_samples;
-                    let gain_cur = ((1.0 - p) * (PI / 2.0)).sin();
-                    let gain_next = (p * (PI / 2.0)).sin();
-
-                    let s_cur = breath_audio[(b_ptr as usize).clamp(0, breath_audio.len().saturating_sub(1))];
-                    let s_next = breath_audio[(b_ptr_next as usize).clamp(0, breath_audio.len().saturating_sub(1))];
-
-                    breath_sample = s_cur * gain_cur + s_next * gain_next;
-
-                    xfade_progress += 1.0;
-                    b_ptr += 1.0;
-                    b_ptr_next += 1.0;
-
-                    if xfade_progress >= xfade_samples {
-                        is_xfading = false;
-                        b_ptr = b_ptr_next;
-                    }
-                } else {
-                    breath_sample = breath_audio[(b_ptr as usize).clamp(0, breath_audio.len().saturating_sub(1))];
-                    b_ptr += 1.0;
-                }
-            } else {
-                let idx = tail_start_sample + (b_ptr - tail_start_sample) % tail_len_f;
-                breath_sample = breath_audio[(idx as usize).clamp(0, breath_audio.len().saturating_sub(1))];
-                b_ptr += 1.0;
-            }
-        } else {
-            b_ptr = t_a;
-            breath_sample = match breath_cons.get(t_out) {
-                Some(&s) => s,
-                None => breath_audio[(b_ptr as usize).clamp(0, breath_audio.len().saturating_sub(1))],
-            };
-        }
-
-        if voicing_mix > 0.0 {
-            output_breath[t_out] += breath_sample * voicing_mix;
-        }
+    for i in 0..buf_len {
+        if unvoiced_weight[i] > 1e-4 { output_unvoiced[i] /= unvoiced_weight[i]; }
     }
 
     let mut actual_len = buf_len;
@@ -989,7 +976,6 @@ fn main() {
     };
 
     // V flag (Harmonic strength) linear
-
     const B_MAX: f32 = 4.0;
     let scale_gain_b = |val: f32| -> f32 {
         if val <= -100.0 { 0.0 }
@@ -1045,7 +1031,7 @@ fn main() {
     };
 
     let chopped_path = Path::new(in_file).with_extension("chopped");
-    let pitch_data = if chopped_path.exists() {
+    let mut pitch_data = if chopped_path.exists() {
         if let Ok(file) = File::open(&chopped_path) {
             if let Ok(data) = bincode::deserialize_from::<_, PitchData>(file) {
                 if data.sr == sr { data } else { extract_pitch_features(&audio, sr) }
@@ -1053,7 +1039,16 @@ fn main() {
         } else { extract_pitch_features(&audio, sr) }
     } else { extract_pitch_features(&audio, sr) };
 
-    let (harm_audio, breath_audio, unvoiced_audio) = separate_components(&audio, sr, &pitch_data);
+    if fv == 1.0 {
+        for i in 0..pitch_data.is_voiced.len() {
+            if pitch_data.is_voiced[i] == 0.0 {
+                pitch_data.is_voiced[i] = 1.0;
+                pitch_data.t0_array[i] = sr as f32 / 100.0;
+            }
+        }
+    }
+
+    let (harm_audio, breath_audio, unvoiced_audio) = separate_components(&audio, sr, fv == 1.0);
 
     let a = (offset_s.max(0.0) * sr as f32) as usize;
     let mut b = if cutoff_s < 0.0 { a + (-cutoff_s * sr as f32) as usize } 
@@ -1069,18 +1064,7 @@ fn main() {
     let tail_n = ((length_s * sr as f32) as usize).max(256);
     let out_n = (cons_out + tail_n).max(256);
 
-    let mut time_map = vec![0.0; out_n];
-
-    if cons_out > 0 && cons_n > 0 {
-        let lin = np_linspace(0.0, cons_n as f32, cons_out);
-        for i in 0..cons_out { time_map[i] = lin[i]; }
-    }
-
-    if out_n > cons_out {
-        let tail_src_len = seg_len.saturating_sub(cons_n).max(1);
-        let lin = np_linspace(cons_n as f32, (cons_n + tail_src_len - 1) as f32, out_n - cons_out);
-        for i in 0..(out_n - cons_out) { time_map[cons_out + i] = lin[i]; }
-    }
+    let time_map = build_time_map(seg_len, cons_n, cons_out, out_n, sr);
 
     let tick_dt = 60.0 / (tempo * 96.0);
     let t_pitch_sec = np_linspace(0.0, (bend_cents.len() as f32 - 1.0) * tick_dt, bend_cents.len());
@@ -1093,14 +1077,14 @@ fn main() {
     for i in 0..out_n { target_f0_hz[i] = 440.0 * 2.0_f32.powf(((pitch_at[i] / 100.0 + t_off_cent / 100.0 + pitch_m) - 69.0) / 12.0); }
 
     let mut audio_out = td_psola_utau(
-        &harm_audio, &breath_audio, &unvoiced_audio, &audio, sr, &target_f0_hz, &time_map, a, b,
-        &pitch_data.epochs, pitch_data.is_voiced, pitch_data.t0_array,
-        -g_gender / 10.0, fv == 1.0, (dg / 100.0) * 2.0, dgs, fg / 100.0,
+        &harm_audio, &breath_audio, &unvoiced_audio, sr, &target_f0_hz, &time_map, a,
+        &pitch_data.epochs, &pitch_data.is_voiced, &pitch_data.t0_array,
+        -g_gender / 10.0, (dg / 100.0) * 2.0, dgs, fg / 100.0,
         v_gain * b_duck, u_gain, b_gain, gg_intensity,
-        tension, cons_n, seed
+        tension, seed
     );
 
-    let norm_target = 0.5_f32; // -6 dBFS
+    let norm_target = 0.5_f32;
     let mut peak = 0.0_f32;
     for sample in &audio_out { if sample.abs() > peak { peak = sample.abs(); } }
     peak += 1e-9;
@@ -1113,4 +1097,157 @@ fn main() {
     let spec = WavSpec { channels: 1, sample_rate: sr, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
     let mut writer = WavWriter::create(out_file, spec).unwrap();
     for sample in audio_out { writer.write_sample((sample.clamp(-1.0, 1.0) * 32767.0) as i16).unwrap(); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn normalize_overlap(mut signal: Vec<f32>, weights: &[f32]) -> Vec<f32> {
+        for (sample, &weight) in signal.iter_mut().zip(weights) {
+            if weight > 1e-4 { *sample /= weight; }
+        }
+        signal
+    }
+
+    #[test]
+    fn shared_overlap_add_preserves_component_linearity() {
+        let grain_len = 64;
+        let harmonic: Vec<f32> = (0..grain_len)
+            .map(|i| (2.0 * PI * i as f32 / 16.0).sin())
+            .collect();
+        let noise: Vec<f32> = (0..grain_len)
+            .map(|i| 0.2 * (2.0 * PI * i as f32 / 7.0).cos())
+            .collect();
+        let combined: Vec<f32> = harmonic.iter().zip(&noise).map(|(&h, &n)| h + n).collect();
+        let window = np_hanning(grain_len);
+
+        let mut out_h = vec![0.0_f32; 160];
+        let mut out_n = vec![0.0_f32; 160];
+        let mut out_combined = vec![0.0_f32; 160];
+        let mut weight_h = vec![0.0_f32; 160];
+        let mut weight_n = vec![0.0_f32; 160];
+        let mut weight_combined = vec![0.0_f32; 160];
+
+        for &position in &[40.25_f32, 72.5, 104.75] {
+            overlap_add_grain(&mut out_h, &mut weight_h, &harmonic, &window, position, 1.0);
+            overlap_add_grain(&mut out_n, &mut weight_n, &noise, &window, position, 1.0);
+            overlap_add_grain(
+                &mut out_combined,
+                &mut weight_combined,
+                &combined,
+                &window,
+                position,
+                1.0,
+            );
+        }
+
+        let out_h = normalize_overlap(out_h, &weight_h);
+        let out_n = normalize_overlap(out_n, &weight_n);
+        let out_combined = normalize_overlap(out_combined, &weight_combined);
+        for i in 0..out_combined.len() {
+            assert!((out_h[i] + out_n[i] - out_combined[i]).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn aperiodic_wola_reconstructs_an_identity_map() {
+        let len = 4096;
+        let source: Vec<f32> = (0..len)
+            .map(|i| {
+                0.4 * (2.0 * PI * i as f32 / 37.0).sin()
+                    + 0.2 * (2.0 * PI * i as f32 / 13.0).cos()
+            })
+            .collect();
+        let time_map: Vec<f32> = (0..len).map(|i| i as f32).collect();
+        let rendered = wola_aperiodic_from_map(&source, &time_map, len, 64);
+
+        for i in 256..(len - 256) {
+            assert!((rendered[i] - source[i]).abs() < 2e-5);
+        }
+    }
+
+    #[test]
+    fn aperiodic_wola_has_no_geometry_level_dip() {
+        let source = vec![1.0_f32; 4096];
+        let time_map: Vec<f32> = (0..2048)
+            .map(|i| 800.0 + i as f32 * 0.23)
+            .collect();
+        let rendered = wola_aperiodic_from_map(&source, &time_map, time_map.len(), 64);
+
+        for sample in &rendered[128..(rendered.len() - 128)] {
+            assert!((*sample - 1.0).abs() < 2e-5);
+        }
+    }
+
+    #[test]
+    fn residual_render_is_independent_of_target_pitch() {
+        let sr = 16_000_u32;
+        let source_len = 4096;
+        let harm = vec![0.0_f32; source_len];
+        let unvoiced = vec![0.0_f32; source_len];
+        let breath: Vec<f32> = (0..source_len)
+            .map(|i| {
+                0.25 * (2.0 * PI * i as f32 / 23.0).sin()
+                    + 0.1 * (2.0 * PI * i as f32 / 7.0).cos()
+            })
+            .collect();
+        let time_map: Vec<f32> = (0..2048).map(|i| i as f32 * 0.75).collect();
+        let epochs: Vec<f32> = (0..26).map(|i| (i * 160) as f32).collect();
+        let voiced = vec![1.0_f32; epochs.len()];
+        let periods = vec![160.0_f32; epochs.len()];
+        let low_pitch = vec![100.0_f32; time_map.len()];
+        let high_pitch = vec![320.0_f32; time_map.len()];
+
+        let render = |pitch: &[f32]| {
+            td_psola_utau(
+                &harm,
+                &breath,
+                &unvoiced,
+                sr,
+                pitch,
+                &time_map,
+                800,
+                &epochs,
+                &voiced,
+                &periods,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                1234,
+            )
+        };
+
+        let low = render(&low_pitch);
+        let high = render(&high_pitch);
+        assert_eq!(low.len(), high.len());
+        for (a, b) in low.iter().zip(&high) {
+            assert!((a - b).abs() < 1e-7);
+        }
+    }
+
+    #[test]
+    fn velocity_scaled_consonant_joins_loop_continuously() {
+        let map = build_time_map(1000, 200, 400, 1200, 100);
+        assert_eq!(map.len(), 1200);
+        assert!((map[0] - 0.0).abs() < 1e-6);
+        assert!((map[1199] - 999.0).abs() < 1e-4);
+        assert!(map.windows(2).all(|pair| pair[1] >= pair[0]));
+        assert!(map[399] < map[400]);
+    }
+
+    #[test]
+    fn loop_map_ping_pongs_only_the_sustain() {
+        let map = build_time_map(1000, 200, 200, 2001, 100);
+        assert!((map[200] - 200.0).abs() < 1e-4);
+        assert!((map[999] - 999.0).abs() < 1e-4);
+        assert!((map[1798] - 200.0).abs() < 1e-4);
+        assert!(map.iter().all(|&position| position >= 0.0 && position <= 999.0));
+    }
 }
