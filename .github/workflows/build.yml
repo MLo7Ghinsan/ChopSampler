@@ -46,8 +46,8 @@ jobs:
           if (-not (Test-Path -LiteralPath "build.rs" -PathType Leaf)) {
             throw "build.rs is missing"
           }
-          if (-not (Test-Path -LiteralPath "icon.ico" -PathType Leaf)) {
-            throw "icon.ico is missing"
+          if (-not (Test-Path -LiteralPath "cupcakke.ico" -PathType Leaf)) {
+            throw "cupcakke.ico is missing"
           }
           cargo clean -p chopsampler
 
