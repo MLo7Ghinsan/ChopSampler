@@ -49,7 +49,7 @@ jobs:
           if (-not (Test-Path -LiteralPath "cupcakke.ico" -PathType Leaf)) {
             throw "cupcakke.ico is missing"
           }
-          cargo clean -p chopsampler
+          cargo clean -p ChopSampler
 
       - name: Build release
         run: cargo build --release --bin ChopSampler --verbose
@@ -81,7 +81,7 @@ jobs:
           <dict>
             <key>CFBundleExecutable</key>      <string>ChopSampler</string>
             <key>CFBundleIconFile</key>        <string>AppIcon</string>
-            <key>CFBundleIdentifier</key>      <string>com.mlo7ghinsan.chopsampler</string>
+            <key>CFBundleIdentifier</key>      <string>com.mlo7ghinsan.ChopSampler</string>
             <key>CFBundleName</key>            <string>ChopSampler</string>
             <key>CFBundleDisplayName</key>     <string>ChopSampler</string>
             <key>CFBundlePackageType</key>     <string>APPL</string>
