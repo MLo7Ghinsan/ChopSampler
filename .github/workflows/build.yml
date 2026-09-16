@@ -1,0 +1,119 @@
+name: Build ChopSampler (Windows / macOS / Linux)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: ChopSampler-linux
+            package: ChopSampler-linux.tar.gz
+          - os: macos-latest
+            artifact: ChopSampler-macos
+            package: ChopSampler-macos.zip
+          - os: windows-latest
+            artifact: ChopSampler-windows
+            package: ChopSampler-windows.zip
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      # Linux audio deps
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+
+      # Windows resources
+      - name: Prepare Windows resource build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath "build.rs" -PathType Leaf)) {
+            throw "build.rs is missing"
+          }
+          if (-not (Test-Path -LiteralPath "icon.ico" -PathType Leaf)) {
+            throw "icon.ico is missing"
+          }
+          cargo clean -p chopsampler
+
+      - name: Build release
+        run: cargo build --release --bin ChopSampler --verbose
+
+      # Windows
+      - name: Package Windows build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath "target/release/ChopSampler.exe" -PathType Leaf)) {
+            throw "Cargo did not produce target/release/ChopSampler.exe"
+          }
+
+          New-Item -ItemType Directory -Force -Path "ChopSampler-windows" | Out-Null
+          Copy-Item -LiteralPath "target/release/ChopSampler.exe" -Destination "ChopSampler-windows/ChopSampler.exe"
+          Compress-Archive -Path "ChopSampler-windows" -DestinationPath "ChopSampler-windows.zip" -Force
+
+      # macOS
+      - name: Package macOS build
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p ChopSampler.app/Contents/MacOS
+          mkdir -p ChopSampler.app/Contents/Resources
+          cp target/release/ChopSampler ChopSampler.app/Contents/MacOS/ChopSampler
+          cat > ChopSampler.app/Contents/Info.plist << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key>      <string>ChopSampler</string>
+            <key>CFBundleIconFile</key>        <string>AppIcon</string>
+            <key>CFBundleIdentifier</key>      <string>com.mlo7ghinsan.chopsampler</string>
+            <key>CFBundleName</key>            <string>ChopSampler</string>
+            <key>CFBundleDisplayName</key>     <string>ChopSampler</string>
+            <key>CFBundlePackageType</key>     <string>APPL</string>
+            <key>CFBundleShortVersionString</key> <string>0.0</string>
+            <key>CFBundleVersion</key>         <string>0.0</string>
+          </dict>
+          </plist>
+          EOF
+          chmod +x ChopSampler.app/Contents/MacOS/ChopSampler
+          ditto -c -k --sequesterRsrc --keepParent ChopSampler.app ChopSampler-macos.zip
+
+      # Linux
+      - name: Package Linux build
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p ChopSampler-linux
+          cp target/release/ChopSampler ChopSampler-linux/ChopSampler
+          cat > ChopSampler-linux/ChopSampler.desktop << EOF
+          [Desktop Entry]
+          Name=ChopSampler
+          Exec=./ChopSampler
+          Icon=./icon.png
+          Type=Application
+          Terminal=false
+          Categories=AudioVideo;Audio;
+          EOF
+          chmod +x ChopSampler-linux/ChopSampler
+          tar -czf ChopSampler-linux.tar.gz ChopSampler-linux
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.package }}
+          if-no-files-found: error
